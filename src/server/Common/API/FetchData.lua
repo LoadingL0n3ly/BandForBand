@@ -44,7 +44,6 @@ local function Request(Data)
 		local data = HttpService:PostAsync(PROXY_URL, json, Enum.HttpContentType.ApplicationJson, false, headers)
 		Response = HttpService:JSONDecode(data)
 	end)
-
 	return Response
 end
 
@@ -54,26 +53,52 @@ local function IsInventoryAvailable(Player)
 	local Data = {
 		["url"] = "https://inventory.roblox.com/v1/users/" .. ID .. "/can-view-inventory"
 	}
-	local json = HttpService:JSONEncode(Data)
+
+	local Response = Request(Data)
 	
-	local Response
-	
-	local success, response = pcall(function()
-		local data = HttpService:PostAsync(PROXY_URL, json, Enum.HttpContentType.ApplicationJson, false, headers)
-		Response = HttpService:JSONDecode(data)
-	end)
-	
-	return Response["canView"]
+	if not Response then
+		task.wait(2)
+		warn("Re-sending request")
+		Response = Request(Data)
+	end
+
+	if Response["canView"] then
+		return Response["canView"]
+	else
+		warn("Unable to determine if inventory is available")
+		warn(Response)
+		return nil
+	end
 end
 
--- takes in player and type of assets to collect
--- {name = "", RobuxCost = int, id = int};
+local function GetLimitedValue(assetId)
+	local Price = 0
 
-
-local function GetNonLimiteds(Player, ASSET_ID)
-	local CanView = IsInventoryAvailable(Player) assert(CanView, "Can't view user's inventory!")
+	local FirstData = {
+		["url"] = "https://catalog.roblox.com/v1/catalog/items/" .. assetId .."/details?itemType=Asset"
+	}
 	
-	local Result = {}
+	local FirstResponse = Request(FirstData)
+
+	if FirstResponse["lowestResalePrice"] then
+		Price = FirstResponse["lowestResalePrice"]
+	else
+		warn("Not able to get price")
+		warn(FirstResponse)
+		warn(FirstData)
+	end
+	
+	return Price
+end
+
+
+local function GetAssets(Player, AssetType: Enum.AssetType)
+	local CanView = IsInventoryAvailable(Player) assert(CanView, "Can't view user's inventory!")
+	if not CanView then return false end
+	
+	local Limiteds = {}
+	local NonLimiteds = {}
+
 	local ID = Player.UserId
 	local NextPageCursor = nil
 
@@ -84,30 +109,51 @@ local function GetNonLimiteds(Player, ASSET_ID)
 		end
 
 		local Data = {
-			["url"] = "https://inventory.roblox.com/v2/users/" .. ID .. "inventory/" .. ASSET_ID .. "?limit = 100" .. CursorText .. "&sortOrder=Asc"
+			["url"] = "https://inventory.roblox.com/v2/users/" .. ID .. "/inventory/" .. AssetType.Value .. "?limit=100" .. CursorText .. "&sortOrder=Asc"
 		}
+		warn(Data.url)
 
 		local answer = Request(Data)
-		NextPageCursor = answer["nextPageCursor"]
-
 		local itemData = answer["data"]
-
-		for i, DataPoint in itemData do
-			local Name = Data.assetName
-			local assetId = Data.assetId
-
-			local AdditionalData = MarketplaceService:GetProductInfo(assetId)
-			
+		
+		if not itemData then 
+			warn("Unable to load page data")
+			warn(answer)
+			continue
 		end
 
+		NextPageCursor = answer["nextPageCursor"]
 
+		for i, DataPoint in itemData do
+			local assetName = DataPoint.assetName
+			local assetId = DataPoint.assetId
+			local assetData = MarketplaceService:GetProductInfo(assetId, Enum.InfoType.Asset)
+			local UniqueID = HttpService:GenerateGUID(false)
+
+			if assetData.IsLimited then
+				-- Item is a limited
+				local assetPrice = GetLimitedValue(assetId)
+				Limiteds[UniqueID] = {Name = assetName, RobloxId = assetId, Price = assetPrice}
+			else
+				-- Item is not a limited
+				local assetPrice = assetData.PriceInRobux
+
+				if assetData.Creator.CreatorTargetId == ID then
+					warn("Player owns this thing, so ignoring")
+					assetPrice = 0
+				end
+
+				NonLimiteds[UniqueID] = {Name = assetName, RobloxId = assetId, Price = assetPrice or 0}
+			end
+		end
 	until not NextPageCursor
 	
+	return Limiteds, NonLimiteds
 end
 
 function class.GetInventory(Player)
-	local ID = Player.UserId
-	
+	local Limiteds, NonLimiteds = GetAssets(Player, Enum.AssetType.Face)
+	print(Limiteds, NonLimiteds)
 end
 
 
